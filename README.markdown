@@ -1,0 +1,24 @@
+# Python NUS console
+
+A simple NUS (Nordic UART Service) console to connect to the UART-over-BLE for
+Nordic chips. It uses Bluez over DBus, and probably requires at least [Bluez
+5.30](http://www.bluez.org/release-of-bluez-5-30/) (tested on version 5.43 in
+Debian).
+
+Simply run the script (using Python 3 - Python 2 is not supported!) and it
+automatically connects to the first NUS console it can find. Exit using
+`Ctrl-X`.
+
+Don't use `Ctrl-D` within MicroPython unless you must: it does a soft reset
+which drops the connection. Detecting this is only partially implemented.
+
+## TODO
+
+  * Exit the console on a disconnect, and not with the first keypress after a
+    disconnect.
+  * Implement scanning. It currently expects that the BLE device is already
+    discovered by Bluez.
+
+## License
+
+This project is licensed under the MIT license, just like MicroPython.
