@@ -16,9 +16,6 @@ NUS_CHARACTERISTIC_TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
 class Console:
     def __init__(self):
         self._device = None
-        self._device_props = None
-        self._rx = None
-        self._tx = None
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self._loop = GLib.MainLoop()
@@ -29,35 +26,71 @@ class Console:
         self._bluez = dbus.Interface(self._bus.get_object("org.bluez", "/"),
                                      "org.freedesktop.DBus.ObjectManager")
 
-        self.find_nus_device()
+        def new_device(path, interfaces):
+            if not 'org.bluez.Device1' in interfaces:
+                return
+            self.on_new_device(path, interfaces['org.bluez.Device1'])
 
-        if not self._device_props['Connected']:
-            print('Connecting to %s (%s)...' % (self._device_props['Name'], self._device_props['Address']), end='')
-            self._device.Connect()
-            print(' ok')
+        # Does this system have a Bluetooth adapter?
+        adapter_path = self.find_adapter()
+        if adapter_path is None:
+            print('It appears there is no Bluetooth adapter present.')
+            sys.exit(1)
+
+        device_path, interface = self.find_nus_device()
+        if device_path is None:
+            print('Cannot find device, starting discovery...')
+            adapter = dbus.Interface(self._bus.get_object('org.bluez', adapter_path), 'org.bluez.Adapter1')
+            adapter.StartDiscovery()
+            print('Waiting for device...')
+            self._bus.add_signal_receiver(new_device, dbus_interface='org.freedesktop.DBus.ObjectManager', signal_name='InterfacesAdded')
         else:
-            print('Connected to %s (%s).' % (self._device_props['Name'], self._device_props['Address']))
+            self.on_device(interface, dbus.Interface(self._bus.get_object('org.bluez', device_path), 'org.bluez.Device1'))
 
-        def prop_changed(iface, changed_props, invalidated_props):
-            self.on_prop_changed(iface, changed_props)
+    def on_device(self, interface, device):
+        # Listen to device events (connect, disconnect, ...)
+        device_props = dbus.Interface(device, 'org.freedesktop.DBus.Properties')
+        device_props.connect_to_signal('PropertiesChanged',
+                                       lambda itf, ch, inv: self.on_prop_changed(itf, ch, device=device, device_props=device_props))
 
-        device_props = dbus.Interface(self._device, 'org.freedesktop.DBus.Properties')
-        device_props.connect_to_signal('PropertiesChanged', prop_changed)
+        if not interface['Connected']:
+            print('Connecting to %s (%s)... ' % (interface['Name'], interface['Address']), end='')
+            sys.stdout.flush()
+            device.Connect()
+            print('ok')
+        else:
+            print('Connected to %s (%s).' % (interface['Name'], interface['Address']))
 
-        self._thread_tx = threading.Thread(target=self.run_tx, daemon=True)
-        self._thread_tx.start()
+        if interface['ServicesResolved']:
+            self.on_services(device, device_props)
 
-        rx_props = dbus.Interface(self._rx, 'org.freedesktop.DBus.Properties')
-        rx_props.connect_to_signal('PropertiesChanged', prop_changed)
-        self._rx.StartNotify()
+    def on_services(self, device, props):
+        if NUS_SERVICE_UUID not in props.Get('org.bluez.Device1', 'UUIDs'):
+            print('  No NUS service.')
+            return
+        if self._device is not None:
+            raise RuntimeError('on_services called twice')
+        self._device = device
 
-        #print('Disconnecting...')
-        #device.Disconnect()
+        rx, tx = self.find_nus_characteristics()
+
+        # Start reading input from stdin.
+        threading.Thread(target=self.run_tx, args=(tx,), daemon=True).start()
+
+        # Start writing output to stdout.
+        rx_props = dbus.Interface(rx, 'org.freedesktop.DBus.Properties')
+        rx_props.connect_to_signal('PropertiesChanged', lambda itf, ch, inv: self.on_prop_changed(itf, ch))
+        rx.StartNotify()
 
     def run(self):
         self._loop.run()
 
-    def on_prop_changed(self, iface, changed_props):
+    def on_new_device(self, path, interface):
+        # called when a device has been added (DBus event)
+        device = dbus.Interface(self._bus.get_object('org.bluez', path), 'org.bluez.Device1')
+        self.on_device(interface, device)
+
+    def on_prop_changed(self, iface, changed_props, device=None, device_props=None):
         if iface == 'org.bluez.GattCharacteristic1':
             if 'Value' not in changed_props:
                 return
@@ -68,26 +101,33 @@ class Console:
             if 'Connected' in changed_props and not changed_props['Connected']:
                 # TODO somehow cleanly shut down the process
                 pass
+            if 'ServicesResolved' in changed_props:
+                if self._device is None:
+                    self.on_services(device, device_props)
+
+    def find_adapter(self):
+        # find the first adapter
+        objects = self._bluez.GetManagedObjects()
+        for path in sorted(objects.keys()):
+            interface = objects[path]
+            if 'org.bluez.Adapter1' not in interface:
+                continue
+            return path
 
     def find_nus_device(self):
         objects = self._bluez.GetManagedObjects()
         for path in objects.keys():
-            interface = objects[path]
-            if 'org.bluez.Device1' not in interface:
+            interfaces = objects[path]
+            if 'org.bluez.Device1' not in interfaces:
                 continue
-            properties = interface['org.bluez.Device1']
-            if NUS_SERVICE_UUID not in properties['UUIDs']:
+            interface = interfaces['org.bluez.Device1']
+            if NUS_SERVICE_UUID not in interface['UUIDs']:
                 continue
-
-            self._device_props = properties
-
-            self._device = dbus.Interface(self._bus.get_object('org.bluez', path), 'org.bluez.Device1')
-            service_path = self.find_nus_service(objects)
-            self.find_nus_characteristics(objects, service_path)
 
             # TODO if there is more than one, let the user choose?
+            return path, interface
 
-        # TODO do scan if no device can be found
+        return None, None
 
     def find_nus_service(self, objects):
         for path in objects.keys():
@@ -100,7 +140,11 @@ class Console:
                 continue
             return path
 
-    def find_nus_characteristics(self, objects, service_path):
+    def find_nus_characteristics(self):
+        objects = self._bluez.GetManagedObjects()
+        service_path = self.find_nus_service(objects)
+        rx = None
+        tx = None
         for path in objects.keys():
             if not path.startswith(service_path):
                 continue
@@ -109,11 +153,12 @@ class Console:
             properties = objects[path]['org.bluez.GattCharacteristic1']
             obj = dbus.Interface(self._bus.get_object('org.bluez', path), 'org.bluez.GattCharacteristic1')
             if properties['UUID'] == NUS_CHARACTERISTIC_RX:
-                self._rx = obj
+                rx = obj
             elif properties['UUID'] == NUS_CHARACTERISTIC_TX:
-                self._tx = obj
+                tx = obj
+        return rx, tx
 
-    def run_tx(self):
+    def run_tx(self, tx):
         # save and restore the old terminal mode
         old_mode = termios.tcgetattr(sys.stdin.fileno())
         try:
@@ -124,7 +169,7 @@ class Console:
                 if s == b'\x18': # Ctrl-X: exit terminal
                     self._loop.quit()
                     sys.exit(0)
-                self._tx.WriteValue(s, {})
+                tx.WriteValue(s, {})
         except dbus.DBusException as e:
             if e.get_dbus_name() == 'org.bluez.Error.Failed' and e.get_dbus_message() == 'Not connected':
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_mode)

@@ -17,8 +17,9 @@ which drops the connection. Detecting this is only partially implemented.
 
   * Exit the console on a disconnect, and not with the first keypress after a
     disconnect.
-  * Implement scanning. It currently expects that the BLE device is already
-    discovered by BlueZ.
+  * Either use a real library (e.g.
+    [gatt-python](https://github.com/getsenic/gatt-python) looks promising), or
+    extract the important bits to a new library.
 
 ## License
 
