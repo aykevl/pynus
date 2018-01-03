@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import dbus
+import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
 import threading
@@ -11,11 +12,21 @@ import time
 class NotConnectedError(Exception):
     pass
 
+class DBusInvalidArgsException(dbus.exceptions.DBusException):
+    _dbus_error_name = 'org.freedesktop.DBus.Error.InvalidArgs'
+
+def format_uuid(uuid):
+    if type(uuid) == int:
+        if uuid > 0xffff:
+            raise ValueError('32-bit UUID not supported yet')
+        uuid = '%04X' % uuid
+    return uuid
+
 class TealBlue:
     def __init__(self):
         self._bus = dbus.SystemBus()
-        self._bluez = dbus.Interface(self._bus.get_object("org.bluez", "/"),
-                                     "org.freedesktop.DBus.ObjectManager")
+        self._bluez = dbus.Interface(self._bus.get_object('org.bluez', '/'),
+                                     'org.freedesktop.DBus.ObjectManager')
 
     def find_adapter(self):
         # find the first adapter
@@ -28,12 +39,31 @@ class TealBlue:
             return Adapter(self, path, properties)
         return None # no adapter found
 
+    # copied from:
+    # https://github.com/adafruit/Adafruit_Python_BluefruitLE/blob/master/Adafruit_BluefruitLE/bluez_dbus/provider.py
+    def _print_tree(self):
+        """Print tree of all bluez objects, useful for debugging."""
+        # This is based on the bluez sample code get-managed-objects.py.
+        objects = self._bluez.GetManagedObjects()
+        for path in sorted(objects.keys()):
+            print("[ %s ]" % (path))
+            interfaces = objects[path]
+            for interface in sorted(interfaces.keys()):
+                if interface in ["org.freedesktop.DBus.Introspectable",
+                            "org.freedesktop.DBus.Properties"]:
+                    continue
+                print("    %s" % (interface))
+                properties = interfaces[interface]
+                for key in sorted(properties.keys()):
+                    print("      %s = %s" % (key, properties[key]))
+
 class Adapter:
     def __init__(self, teal, path, properties):
         self._teal = teal
         self._path = path
         self._properties = properties
         self._object = dbus.Interface(teal._bus.get_object('org.bluez', path), 'org.bluez.Adapter1')
+        self._advertisement = None
 
     def __repr__(self):
         return '<tealblue.Adapter address=%s>' % (self._properties['Address'])
@@ -52,6 +82,24 @@ class Adapter:
 
     def scan(self):
         return Scanner(self._teal, self, self.devices())
+
+    @property
+    def advertisement(self):
+        if self._advertisement is None:
+            self._advertisement = Advertisement(self._teal, self)
+        return self._advertisement
+
+    def advertise(self, enable):
+        if enable:
+            self.advertisement.enable()
+        else:
+            self.advertisement.disable()
+
+    def advertise_data(self, local_name=None, service_data=None, service_uuids=None, manufacturer_data=None):
+        self.advertisement.local_name = local_name
+        self.advertisement.service_data = service_data
+        self.advertisement.service_uuids = service_uuids
+        self.advertisement.manufacturer_data = manufacturer_data
 
 class Scanner:
     def __init__(self, teal, adapter, initial_devices):
@@ -126,6 +174,9 @@ class Device:
 
     def connect(self):
         self._device.Connect()
+
+    def disconnect(self):
+        self._device.Disconnect()
 
     def resolve_services(self):
         self._services_resolved.wait()
@@ -216,10 +267,13 @@ class Characteristic:
 
     def _on_prop_changed(self, properties, changed_props, invalidated_props):
         for key, value in changed_props.items():
-            self._properties[key] = value
+            self._properties[key] = bytes(value)
 
         if 'Value' in changed_props and self.on_notify is not None:
             self.on_notify(self, changed_props['Value'])
+
+    def read(self):
+        return bytes(self._char.ReadValue({}))
 
     def write(self, value):
         start = time.time()
@@ -246,12 +300,96 @@ class Characteristic:
     def uuid(self):
         return str(self._properties['UUID'])
 
-def glib_mainloop_wrapper(callback):
+class Advertisement(dbus.service.Object):
+    PATH = '/com/github/aykevl/pynus/advertisement'
+
+    def __init__(self, teal, adapter):
+        self._teal = teal
+        self._adapter = adapter
+        self._enabled = False
+        self.service_uuids = None
+        self.manufacturer_data = None
+        self.solicit_uuids = None
+        self.service_data = None
+        self.local_name = None
+        self.include_tx_power = None
+        self._manager = dbus.Interface(teal._bus.get_object('org.bluez', self._adapter._path),
+                                       'org.bluez.LEAdvertisingManager1')
+        self._adv_enabled = threading.Event()
+        dbus.service.Object.__init__(self, teal._bus, self.PATH)
+
+    def enable(self):
+        if self._enabled:
+            return
+        self._manager.RegisterAdvertisement(dbus.ObjectPath(self.PATH), dbus.Dictionary({}, signature='sv'),
+                                     reply_handler=self._cb_enabled,
+                                     error_handler=self._cb_enabled_err)
+        self._adv_enabled.wait()
+        self._adv_enabled.clear()
+
+    def _cb_enabled(self):
+        self._enabled = True
+        if self._adv_enabled.is_set():
+            raise RuntimeError('called enable() twice')
+        self._adv_enabled.set()
+
+    def _cb_enabled_err(self, err):
+        self._enabled = False
+        if self._adv_enabled.is_set():
+            raise RuntimeError('called enable() twice')
+        self._adv_enabled.set()
+
+    def disable(self):
+        if not self._enabled:
+            return
+        self._bus.UnregisterAdvertisement(PATH)
+        self._enabled = False
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @dbus.service.method('org.freedesktop.DBus.Properties',
+                         in_signature='s',
+                         out_signature='a{sv}')
+    def GetAll(self, interface):
+        print('GetAll')
+        if interface != 'org.bluez.LEAdvertisement1':
+            raise DBusInvalidArgsException()
+
+        try:
+            properties = {
+                'Type': dbus.String('peripheral'),
+            }
+            if self.service_uuids is not None:
+                properties['ServiceUUIDs'] = dbus.Array(map(format_uuid, self.service_uuids), signature='s')
+            if self.solicit_uuids is not None:
+                properties['SolicitUUIDs'] = dbus.Array(map(format_uuid, self.solicit_uuids), signature='s')
+            if self.manufacturer_data is not None:
+                properties['ManufacturerData'] = dbus.Dictionary({k: v for k, v in self.manufacturer_data.items()}, signature='qv')
+            if self.service_data is not None:
+                properties['ServiceData'] = dbus.Dictionary(self.service_data, signature='sv')
+            if self.local_name is not None:
+                properties['LocalName'] = dbus.String(self.local_name)
+            if self.include_tx_power is not None:
+                properties['IncludeTxPower'] = dbus.Boolean(self.include_tx_power)
+        except:
+            print('err')
+        print('properties:', properties)
+        return properties
+
+    @dbus.service.method('org.bluez.LEAdvertisement1',
+                         in_signature='',
+                         out_signature='')
+    def Release(self):
+        self._enabled = True
+
+def glib_mainloop_wrapper(callback, args=()):
     loop = GLib.MainLoop()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     def callback_wrapper():
         try:
-            callback()
+            callback(*args)
         except:
             traceback.print_exc()
         finally:

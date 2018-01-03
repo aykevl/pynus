@@ -9,11 +9,16 @@ NUS_SERVICE_UUID      = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
 NUS_CHARACTERISTIC_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
 NUS_CHARACTERISTIC_TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
 
-def find_device(adapter):
+def scan_device(adapter):
     with adapter.scan() as scanner:
         for device in scanner:
-            if '6e400001-b5a3-f393-e0a9-e50e24dcca9e' in device.UUIDs:
+            if NUS_SERVICE_UUID in device.UUIDs:
                 return device
+
+def lookup_device(adapter):
+    for device in adapter.devices():
+        if NUS_SERVICE_UUID in device.UUIDs:
+            return device
 
 def run_terminal(tx):
     old_mode = termios.tcgetattr(sys.stdin.fileno())
@@ -41,7 +46,11 @@ def on_notify(characteristic, value):
 def nus():
     adapter = tealblue.TealBlue().find_adapter()
 
-    device = find_device(adapter)
+    # TODO: notify if scanning
+    device = lookup_device(adapter)
+    if not device:
+        print('Scanning...')
+        device = scan_device(adapter)
     if not device.connected:
         print('Connecting to %s (%s)...' % (device.name, device.address))
         device.connect()
