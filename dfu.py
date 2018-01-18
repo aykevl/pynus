@@ -110,8 +110,8 @@ class FirmwareUpdater:
             # Erase the ISR vector of the app, so it won't start the app on
             # reset.
             self.do_dfu_command(struct.pack('BBH', COMMAND_ERASE_PAGE, 0, self.info.get_page_number(self.info.app_start)))
-        elif command == 'write':
-            print('Command: write hex file')
+        elif command in ['flash', 'deploy', 'upload']:
+            print('Command: flash hex file')
             self.write_hex(arg)
         elif command == 'ping':
             print('Command: ping')
@@ -124,6 +124,7 @@ class FirmwareUpdater:
             self.device.disconnect()
         else:
             print('Unknown command:', command)
+            help()
 
     def print_info(self):
         print('DFU version:        ', self.info.version)
@@ -240,12 +241,29 @@ class FirmwareUpdater:
         if block is not None:
             yield block
 
+def help():
+    print('Available command-line arguments:')
+    print('help            show this message')
+    print('info            retrieve chip/size etc. from DFU')
+    print('flash <path>    flash the given Intel .hex file')
+    print('reset           reset chip (will disconnect!)')
+    print('disconnect      disconnect the chip')
+    print('erase           DEBUG: erase first page of application')
+    print('ping            DEBUG: see whether the device is still alive')
+    print('start           DEBUG: try to start the app (may fail)')
 
-if __name__ == '__main__':
+
+def main():
     command = None
     arg = None
     if len(sys.argv) > 1:
         command = sys.argv[1]
     if len(sys.argv) > 2:
         arg = sys.argv[2]
+    if command == 'help':
+        help()
+        return
     tealblue.glib_mainloop_wrapper(FirmwareUpdater, (command, arg))
+
+if __name__ == '__main__':
+    main()
