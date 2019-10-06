@@ -156,7 +156,7 @@ class FirmwareUpdater:
         if self.call_response[0] != 0:
             raise ValueError('DFU command returned non-zero')
 
-    def on_notify(self, characterstic, value):
+    def on_notify(self, characteristic, value):
         self.call_response = value
         if self.call_event.is_set():
             # This is not a true safety check as there is a race condition,
@@ -182,7 +182,7 @@ class FirmwareUpdater:
                     for i in range(0, len(page), 20):
                         self.do_dfu_write(self.char_buff, page.data[i:i+20])
                 else:
-                    # fall back to low speed on the same characterstic
+                    # fall back to low speed on the same characteristic
                     for i in range(0, len(page), 16):
                         self.do_dfu_command(struct.pack('BBH16s', COMMAND_ADD_BUFFER, 0, 0, page.data[i:i+16]))
 
