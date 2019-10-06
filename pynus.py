@@ -6,8 +6,8 @@ import sys
 import tty
 
 NUS_SERVICE_UUID      = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
-NUS_CHARACTERISTIC_RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
-NUS_CHARACTERISTIC_TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+NUS_CHARACTERISTIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+NUS_CHARACTERISTIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
 
 def scan_device(adapter):
     with adapter.scan() as scanner:
@@ -20,7 +20,7 @@ def lookup_device(adapter):
         if NUS_SERVICE_UUID in device.UUIDs:
             return device
 
-def run_terminal(tx):
+def run_terminal(rx):
     old_mode = termios.tcgetattr(sys.stdin.fileno())
     try:
         tty.setraw(sys.stdin.fileno())
@@ -29,7 +29,7 @@ def run_terminal(tx):
             s = s.replace(b'\n', b'\r')
             if s == b'\x18': # Ctrl-X: exit terminal
                 return
-            tx.write(s)
+            rx.write(s)
     except tealblue.NotConnectedError:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_mode)
         print('lost connection', file=sys.stderr)
@@ -66,10 +66,10 @@ def nus():
     rx = service.characteristics[NUS_CHARACTERISTIC_RX]
     tx = service.characteristics[NUS_CHARACTERISTIC_TX]
 
-    rx.start_notify()
-    rx.on_notify = on_notify
+    tx.start_notify()
+    tx.on_notify = on_notify
 
-    run_terminal(tx)
+    run_terminal(rx)
 
 if __name__ == '__main__':
     tealblue.glib_mainloop_wrapper(nus)
