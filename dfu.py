@@ -55,7 +55,7 @@ class Block:
 def scan_device(adapter):
     with adapter.scan() as scanner:
         for device in scanner:
-            print(device, device.UUIDs)
+            print('found device %s (%s)' % (device.name, device.address))
             if DFU_SERVICE_UUID in device.UUIDs:
                 return device
 
