@@ -137,12 +137,16 @@ class Scanner:
         return self._queue.get()
 
 class Device:
+    EVENT_CONNECTED = 1
+    EVENT_DISCONNECTED = 2
+
     def __init__(self, teal, path, properties):
         self._teal = teal
         self._path = path
         self._properties = properties
         self._services_resolved = threading.Event()
         self._services = None
+        self.on_event = None
 
         if properties['ServicesResolved']:
             self._services_resolved.set()
@@ -167,6 +171,11 @@ class Device:
                 self._services_resolved.set()
             else:
                 self._services_resolved.clear()
+        if "Connected" in changed_props and self.on_event is not None:
+            if changed_props['Connected']:
+                self.on_event(self, self.EVENT_CONNECTED)
+            else:
+                self.on_event(self, self.EVENT_DISCONNECTED)
 
     def _wait_for_discovery(self):
         # wait until ServicesResolved is True
